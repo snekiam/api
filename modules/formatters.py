@@ -1,4 +1,3 @@
-
 class Formatter:
     """Formatter abstract class. Describes contract for all child formatters"""
 
@@ -17,10 +16,12 @@ class WakeWordFormatter(Formatter):
         super().__init__()
 
     def format(self, data):
+        # TODO: document this function better
+        # TODO: write test cases for this function
         form = data.copy()
         for key in form:
             if key == 'isWakeWord':
-                form[key] = 'ww' if(form[key]) else 'nww'
+                form[key] = 'ww' if (form[key].lower() == "true") else 'nww'
             elif key == 'timestamp':
                 form[key] = int(form[key])
             else:

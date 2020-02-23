@@ -4,13 +4,13 @@ from os.path import join
 from db_config_sample import CONFIG
 import time
 
+
 def connect():
-    cxn = m.connect(
-        host=CONFIG['host'],
-        user=CONFIG['user'],
-        passwd=CONFIG['password']
-    )
+    cxn = m.connect(host=CONFIG['host'],
+                    user=CONFIG['user'],
+                    passwd=CONFIG['password'])
     return cxn
+
 
 def get_databases(cxn):
     """
@@ -87,8 +87,8 @@ def what_courses_can_i_take(cxn):
 
 def courses_offered(cxn, course):
     """ Answers the question of when can I take "X"course?
-        
-    Args: 
+
+    Args:
         cxn: MySQL database connection object
         course: the course user wants terms from. Expected format is string
         "department courseNum"
@@ -113,10 +113,10 @@ def courses_offered(cxn, course):
 
 def does_professor_teach_course(cxn, profLastName, profFirstName, course):
     """ Answers the question of 'Does [Professor] teach [Course]'?
-        
-    Args: 
+
+    Args:
         cxn: MySQL database connection object
-        prof: the name of the professor. If first and last name expressed, otherwise, last name 
+        prof: the name of the professor. If first and last name expressed, otherwise, last name
         will be used alone
         course: the course user wants terms from. Expected format is string
         "department courseNum"
@@ -127,11 +127,10 @@ def does_professor_teach_course(cxn, profLastName, profFirstName, course):
 
     c.execute("use dev")
 
-
     query = "SELECT c.courseName from Courses c INNER JOIN Professors p on c.Professors_id = p.id where p.lastName like \"%"
     query += profLastName + "%\""
 
-    #this can be an article of discussion for matching professor names
+    # this can be an article of discussion for matching professor names
     if profFirstName != "":
         query += " and p.firstName likel \"%"
         query += profFirstName + "%\""
@@ -147,8 +146,6 @@ def does_professor_teach_course(cxn, profLastName, profFirstName, course):
     if len(tups) == 0:
         return False
     return True
-
-
 
 
 if __name__ == "__main__":

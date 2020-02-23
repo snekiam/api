@@ -1,8 +1,10 @@
 {
     "mysql": {
         "host": "HOSTNAME",
+        "port": "PORT e.g. 3306",
         "user": "USERNAME",
         "password": "PASSWORD",
+        "database": "DATABASE",
         "sql_dir": "sql",
         "create_file": "csai_nov_8_2019_create_script.min.sql"
     }
