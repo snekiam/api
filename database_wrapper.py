@@ -10,17 +10,87 @@ different databases and storage locations.
     ents = db.get_entities()
 """
 import json
+import csv
 from abc import ABC, abstractmethod
 from typing import List, Optional, Union
 
-import mysql.connector
+
 import sqlalchemy
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from Entity.AudioSampleMetaData import AudioSampleMetaData, NoiseLevel
+from Entity.Calendars import Calendars
 from Entity.Courses import Courses
+from Entity.Locations import Locations
+from Entity.QuestionAnswerPair import QuestionAnswerPair
+from Entity.Professors import Professors, ProfessorsProperties
+from Entity.Clubs import Clubs
+from Entity.Sections import Sections, SectionType
 
+from fuzzywuzzy import fuzz
+
+
+UNION_ENTITIES = Union[
+    Calendars, Courses, Professors, AudioSampleMetaData, QuestionAnswerPair
+]
+UNION_PROPERTIES = Union[ProfessorsProperties]
+
+default_tag_column_dict = {
+    Calendars: {"date"},
+    Courses: {"courseName", "courseNum", "dept"},
+    Locations: {"building_number", "name"},
+    Professors: {"firstName", "lastName"},
+    Clubs: {"club_name"},
+    Sections: {"section_name"}
+}
+
+EXPECTED_KEYS_BY_ENTITY = {
+    AudioSampleMetaData : [
+        "is_wake_word",
+        "first_name",
+        "last_name",
+        "gender",
+        "noise_level",
+        "location",
+        "tone",
+        "timestamp",
+        "username",
+        "filename",
+    ],
+    Clubs : [
+        "club_name",
+        "types",
+        "desc",
+        "contact_email",
+        "contact_email_2",
+        "contact_person",
+        "contact_phone",
+        "box",
+        "advisor",
+        "affiliation"
+    ],
+    Locations : [
+        "building_number",
+        "name",
+        "longitude",
+        "latitude"
+    ],
+    Sections : [
+        "section_name",
+        "instructor",
+        "alias",
+        "title",
+        "phone",
+        "office",
+        "type",
+        "days",
+        "start",
+        "end",
+        "location",
+        "department"
+    ]
+}
 
 class BadDictionaryKeyError(Exception):
     """Raised when the given JSON/dict is missing some required fields.
@@ -96,7 +166,7 @@ class NimbusDatabase(ABC):
     should implement these operations such as `connect`
     """
 
-    def __init__(self, config_file: str = 'config.json') -> None:
+    def __init__(self, config_file: str = "config.json") -> None:
         """
         Inits Nimbus Database using the hostname, username, password
         found inside the config_file.
@@ -105,11 +175,12 @@ class NimbusDatabase(ABC):
 
     @abstractmethod
     def get_property_from_entity(
-            self,
-            prop: List[str],
-            entity: str,
-            condition_field: Optional[str] = None,
-            condition_value: Optional[str] = None) -> List[str]:
+        self,
+        prop: List[str],
+        entity: str,
+        condition_field: Optional[str] = None,
+        condition_value: Optional[str] = None,
+    ) -> List[str]:
         """A high-order function to get properties from objects in the database.
 
         Example:
@@ -135,14 +206,15 @@ class NimbusDatabase(ABC):
 
     @abstractmethod
     def get_property_from_related_entities(
-            self,
-            prop: List[str],
-            entity1: str,
-            entity2: str,
-            key1: str,
-            key2: Optional[str] = None,
-            condition_field: Optional[str] = None,
-            condition_value: Optional[str] = None) -> List[str]:
+        self,
+        prop: List[str],
+        entity1: str,
+        entity2: str,
+        key1: str,
+        key2: Optional[str] = None,
+        condition_field: Optional[str] = None,
+        condition_value: Optional[str] = None,
+    ) -> List[str]:
         """A higher-order function to ????
 
         Example:
@@ -247,87 +319,272 @@ def raises_database_error(func):
     return wrapper
 
 
-class NimbusMySQLAlchemy():  # NimbusMySQLAlchemy(NimbusDatabase):
+class NimbusMySQLAlchemy:  # NimbusMySQLAlchemy(NimbusDatabase):
     """
     """
 
-    def __init__(self, config_file: str = 'config.json') -> None:
-        # # sqlalchemy needs a Base class for all the database entities
-        # self.Base = declarative_base()
+    def __init__(self, config_file: str = "config.json") -> None:
         self.engine = None  # gets set according to config_file
+        self.Clubs = Clubs
+        self.Sections = Sections
+        self.Calendars = Calendars
         self.Courses = Courses
+        self.Professors = Professors
         self.AudioSampleMetaData = AudioSampleMetaData
+        self.Locations = Locations
+        self.QuestionAnswerPair = QuestionAnswerPair
 
         with open(config_file) as json_data_file:
             config = json.load(json_data_file)
 
-        if config.get('mysql', False):
-            mysql_config = config['mysql']
+        if config.get("mysql", False):
+            mysql_config = config["mysql"]
             RDBMS = "mysql"
             PIP_PACKAGE = "mysqlconnector"
             SQLALCHEMY_DATABASE_URI = "{}+{}://{}:{}@{}:{}/{}".format(
-                RDBMS, PIP_PACKAGE, mysql_config['user'],
-                mysql_config['password'], mysql_config['host'],
-                mysql_config['port'], mysql_config['database'])
+                RDBMS,
+                PIP_PACKAGE,
+                mysql_config["user"],
+                mysql_config["password"],
+                mysql_config["host"],
+                mysql_config["port"],
+                mysql_config["database"],
+            )
             self.engine = create_engine(SQLALCHEMY_DATABASE_URI)
 
             if self.engine is None:
-                raise BadConfigFileError('failed to connect to MySQL')
+                raise BadConfigFileError("failed to connect to MySQL")
         else:
-            msg = "config.json is missing {} field.".format('mysql')
+            msg = "config.json is missing {} field.".format("mysql")
             raise BadConfigFileError(msg)
 
         self.inspector = inspect(self.engine)
         self._create_database_session()
         print("initialized NimbusMySQLAlchemy")
 
+    @staticmethod
+    def validate_input_keys(input_data: dict, expected_keys: set):
+        if len(input_data) == 0:
+            msg = "expected: {} but got: {}"
+            msg = msg.format(expected_keys, set(input_data.keys()))
+            raise BadDictionaryKeyError(msg)
+
+        # assert that the formatted_data does not have extra keys
+        for k in input_data:
+            if k not in expected_keys:
+                msg = "expected: {} but got: {}"
+                msg = msg.format(expected_keys, set(input_data.keys()))
+                raise BadDictionaryKeyError(msg)
+
+        # assert that the keys_i_care_about are in formatted_data
+        for k in expected_keys:
+            if k not in input_data:
+                msg = "expected: {} but got: {}"
+                msg = msg.format(expected_keys, set(input_data.keys()))
+                raise BadDictionaryKeyError(msg)
+
     def _create_all_tables(self):
-        # TODO: reconsider if this even works???
-        # self.Base.metadata.create_all(self.engine)
-        # TODO: go with this instead... more explicit...
         def __safe_create(SQLAlchemy_object):
             table_name = SQLAlchemy_object.__tablename__
-            print("creating {}...".format(table_name))
+            print(f"creating {table_name}...")
             if table_name in self.inspector.get_table_names():
-                print("<{}> already exists".format(table_name))
+                print(f"<{table_name}> already exists")
                 return
             SQLAlchemy_object.__table__.create(bind=self.engine)
-            print("<{}> created".format(table_name))
+            print(f"<{table_name}> created")
             return
 
+        __safe_create(self.Clubs)
+        __safe_create(self.Sections)
+        __safe_create(self.Calendars)
         __safe_create(self.Courses)
+        __safe_create(self.Professors)
         __safe_create(self.AudioSampleMetaData)
+        __safe_create(self.Locations)
+        __safe_create(self.QuestionAnswerPair)
 
     def _create_database_session(self):
         Session = sessionmaker(bind=self.engine)
         self.session = Session()
         print("initialized database session")
 
-    def get_course_properties(self, department: str,
-                              course_num: Union[str, int]) -> List[Courses]:
+    def get_all_qa_pairs(self):
+
+        qa_entity = QuestionAnswerPair
+
+        query_session = self.session.query(qa_entity.question_format, qa_entity.answer_format)
+        result = query_session.all()
+
+        return result
+
+    def return_qa_pair_csv(self):
+        data = self.get_all_qa_pairs()
+
+        with open('qa_pair.csv', 'w') as out:
+            csv_out = csv.writer(out)
+            csv_out.writerow(['question_format', 'answer_format'])
+            for row in data:
+                csv_out.writerow(row)
+
+    def partial_fuzzy_match(self, tag_value, identifier):
+        return fuzz.partial_ratio(tag_value, identifier)
+
+    def full_fuzzy_match(self, tag_value, identifier):
+        return fuzz.ratio(tag_value, identifier)
+
+    def get_property_from_entity(
+        self, prop: str, entity: UNION_ENTITIES, identifier: str,
+        tag_column_map: dict = default_tag_column_dict
+    ):
+        """
+        This function implements the abstractmethod to get a column of values
+        from a NimbusDatabase entity.
+
+        Example:
+        >>> db = NimbusMySQLAlchemy()
+        >>> db.get_property_from_entity(
+            prop="email",
+            entity=Entity.Professors.Professors,
+            entity_string="Khosmood",
+        )
+        >>> ["foaad@calpoly.edu"]
+
+        Args:
+            prop: the relevant property value to retrieve from matching entities
+            entity: the type of entity we want to get the property from
+            identifier: a string that identifies the entity in some way (i.e., a professor's name)
+            tag_column_map: a dictionary mapping entity types to columns that identify the entities
+                ex:
+                {Professors: {"firstName", "lastName"}}
+
+        Returns:
+            A list of values for `prop`,
+            such that the `entity` matches `identifier`.
+        """
+
+        MATCH_THRESHOLD = 80
+
+        # TODO: be smart by check only Professor.firstName Professor.lastName
+        # TODO: only check Course.dept, Course.course_num, Course.course_name
+        tag_props = []
+        for k in entity.__dict__:
+            if k in tag_column_map[entity]:
+                tag_props.append(k)
+
+        results = []
+        query_obj = self.session.query(entity)
+        for row in query_obj.all():
+            total_similarity = 0
+            tags = []
+            for tag_prop in tag_props:
+                total_similarity += self.full_fuzzy_match(str(row.__dict__[tag_prop]), identifier)
+                tags.append(str(row.__dict__[tag_prop]))
+
+            if total_similarity > MATCH_THRESHOLD:
+                results.append((total_similarity, tags, str(row.__dict__[prop])))
+
+        if len(results) < 1:
+            return None
+
+        sorted_results = sorted(results, key=lambda pair: pair[0])
+        return sorted_results[-1][2]
+
+    def get_course_properties(
+        self, department: str, course_num: Union[str, int]
+    ) -> List[Courses]:
         return (
             # sqlalchemy doesn't use type annotations
             # and thus does not necessarily promise a List[Courses]
             # even so we can expect .all() to return a list
             # so long as there is no error in the MySQL syntax
-            self.session.query(Courses).filter(
-                Courses.dept == department,
-                Courses.courseNum == course_num).all())
+            self.session.query(Courses)
+            .filter(Courses.dept == department, Courses.courseNum == course_num)
+            .all()
+        )
 
-    def create_AudioSampleMetaData_table(self) -> None:
-        table_name = self.AudioSampleMetaData.__tablename__
-        if table_name in self.inspector.get_table_names():
-            print("table already exists")
-            return
-
-        self.AudioSampleMetaData.__table__.create(bind=self.engine)
-
-    @raises_database_error  # noqa - C901 "too complex" - agreed TODO: reduce complexity
-    def save_audio_sample_meta_data(self, formatted_data: dict) -> bool:
+    def save_entity(self, entity_type, data_dict: dict, filter_fields=[]) -> bool:
         """
-        Save the metadata into the NimbusDatabase.
+        Save an entity into the database. Can only be used when the key names in data_dict
+        match the entity field names (order shouldn't matter, but cases and spelling do matter).
 
-        formatted_data this point looks like:
+        Note: INSERTs will be in cyan, and UPDATEs will be in yellow.
+
+        data_dict should be a dictionary of field names and values, looking like:
+        {
+            "field": value,
+            "..."  : ...
+        }
+
+        filter_fields is a list of variable names (strings) to match for when running an 
+        update query. If not provided, defaults to an empty list (basically an INSERT)
+
+        Raises:
+            BadDictionaryKeyError - ...
+            BadDictionaryValueError - ...
+
+        Returns:
+            True if all is good, else False
+        """
+
+        # Maps Entity classes that need extra data formatting to their formatting methods
+        format_method_by_entity = {
+            AudioSampleMetaData : self.format_audio_sample_meta_data_dict
+        }
+
+        # Validate input
+        self.validate_input_keys(data_dict, EXPECTED_KEYS_BY_ENTITY[entity_type])
+
+        # If the data is supposed to be formatted, format it!
+        if entity_type in format_method_by_entity:
+            data_dict = format_method_by_entity[entity_type](data_dict)
+
+        # Grab the entity class attributes and initialize entity to None
+        entity_attributes = entity_type.__dict__
+        entity = None
+
+        # If filter_fields is provided, we can check if we are performing an UPDATE or INSERT.
+        if not filter_fields == []:
+            query = self.session.query(entity_type)
+
+            for field in filter_fields:
+                query = query.filter(getattr(entity_type, field) == data_dict[field])
+
+            entity = query.first()
+            if entity:
+                print("\033[93mUpdating {} in {}...\033[00m".format(
+                      entity, entity_attributes['__tablename__']))
+            else:
+                entity = entity_type()
+                print("\033[96mInserting into {}...\033[00m".format(
+                      entity_attributes['__tablename__']))
+        else:
+            entity = entity_type()
+            print("\033[96mInserting into {}...\033[00m".format(
+                  entity_attributes['__tablename__']))
+            
+        # Grab the entity class fields by cleaning the attributes dictionary - discard anything
+        # with underscores in the front or back
+        # Note: Make sure you don't label any important data fields with underscores
+        # in the front or back!
+        entity_fields = dict(filter(lambda i: not (i[0][0] == '_' or i[0][-1] == '_'), 
+                                    entity_attributes.items()))
+
+        # Ignore the first field, since it's assumed to be a primary key
+        # Populate the entity with values from data_dict
+        for entity_field in list(entity_fields.keys())[1:]:
+            setattr(entity, entity_field, data_dict[entity_field])
+
+        # Perform the actual UPDATE or INSERT
+        print("Saving to database: {}...".format(entity))
+        self.session.add(entity)
+        self.session.commit()
+        print("\033[92mSaved!\033[00m")
+
+        return True
+
+    def format_audio_sample_meta_data_dict(self, raw_data_dict: dict) -> dict:
+        """
+        raw_data_dict at this point looks like:
         {
             "isWakeWord": True,
             "firstName": "jj",
@@ -342,83 +599,52 @@ class NimbusMySQLAlchemy():  # NimbusMySQLAlchemy(NimbusDatabase):
         }
 
         Raises:
-            BadDictionaryKeyError - ...
             BadDictionaryValueError - ...
 
         Returns:
-            True if all is good, else False
+            A new, formatted data dictionary
         """
-        keys_i_care_about = {
-            'isWakeWord', 'firstName', 'lastName', 'gender', 'noiseLevel',
-            'location', 'tone', 'timestamp', 'username', 'filename'
-        }
 
-        print(formatted_data)
+        formatted_data = raw_data_dict
 
-        if len(formatted_data) == 0:
-            msg = "expected: {} but got: {}"
-            msg = msg.format(keys_i_care_about, set(formatted_data.keys()))
-            raise BadDictionaryKeyError(msg)
-
-        # assert that the formatted_data does not have extra keys
-        for k in formatted_data:
-            if k not in keys_i_care_about:
-                msg = "expected: {} but got: {}"
-                msg = msg.format(keys_i_care_about, set(formatted_data.keys()))
-                raise BadDictionaryKeyError(msg)
-
-        # assert that the keys_i_care_about are in formatted_data
-        for k in keys_i_care_about:
-            if k not in formatted_data:
-                msg = "expected: {} but got: {}"
-                msg = msg.format(keys_i_care_about, set(formatted_data.keys()))
-                raise BadDictionaryKeyError(msg)
-
-        # create an AudioSampleMetaData object with the given metadata
-        metadata = AudioSampleMetaData()
-
-        isWW = formatted_data['isWakeWord']
-        if ((isWW == 'ww') or (isWW is True)):
-            metadata.is_wake_word = True
-        elif ((isWW == 'nww') or (isWW is False)):
-            metadata.is_wake_word = False
+        isWW = raw_data_dict["isWakeWord"]
+        if (isWW == "ww") or (isWW is True):
+            formatted_data.pop('isWakeWord')
+            formatted_data['is_wake_word'] = True
+        elif (isWW == "nww") or (isWW is False):
+            formatted_data.pop('isWakeWord')
+            formatted_data['is_wake_word'] = False
         else:
             msg = "unexpected values for isWakeWord\n"
             msg += "expected 'ww' or True or 'nww' or False but got '{}'"
-            msg = msg.format(formatted_data['isWakeWord'])
+            msg = msg.format(raw_data_dict["isWakeWord"])
             raise BadDictionaryValueError(msg)
 
-        metadata.first_name = formatted_data['firstName']
-        metadata.last_name = formatted_data['lastName']
-        metadata.gender = formatted_data['gender']
-
-        if (formatted_data['noiseLevel'] == 'q' or
-                formatted_data['noiseLevel'] == 'quiet'):
-            metadata.noise_level = NoiseLevel.quiet
-        elif (formatted_data['noiseLevel'] == 'm' or
-              formatted_data['noiseLevel'] == 'medium'):
-            metadata.noise_level = NoiseLevel.medium
-        elif (formatted_data['noiseLevel'] == 'l' or
-              formatted_data['noiseLevel'] == 'loud'):
-            metadata.noise_level = NoiseLevel.loud
+        if (
+            raw_data_dict["noiseLevel"] == "q"
+            or raw_data_dict["noiseLevel"] == "quiet"
+        ):
+            formatted_data.pop('noise_level')
+            formatted_data['noise_level'] = NoiseLevel.quiet
+        elif (
+            raw_data_dict["noiseLevel"] == "m"
+            or raw_data_dict["noiseLevel"] == "medium"
+        ):
+            formatted_data.pop('noise_level')
+            formatted_data['noise_level'] = NoiseLevel.medium
+        elif (
+            raw_data_dict["noiseLevel"] == "l"
+            or raw_data_dict["noiseLevel"] == "loud"
+        ):
+            formatted_data.pop('noise_level')
+            formatted_data['noise_level'] = NoiseLevel.loud
         else:
             msg = "unexpected values for noiseLevel\n"
             msg += "expected 'q' or 'm' or 'l' but got '{}'"
-            msg = msg.format(formatted_data['noiseLevel'])
+            msg = msg.format(raw_data_dict["noiseLevel"])
             raise BadDictionaryValueError(msg)
 
-        metadata.location = formatted_data['location']
-        metadata.tone = formatted_data['tone']
-        metadata.timestamp = formatted_data['timestamp']
-        metadata.username = formatted_data['username']
-
-        metadata.filename = formatted_data['filename']
-
-        # insert this new metadata object into the AudioSampleMetaData table
-        self.session.add(metadata)
-        self.session.commit()
-
-        pass
+        return formatted_data
 
     def _execute(self, query: str):
         return self.engine.execute(query)
@@ -427,305 +653,101 @@ class NimbusMySQLAlchemy():  # NimbusMySQLAlchemy(NimbusDatabase):
         print("NimbusMySQLAlchemy closed")
 
 
-class NimbusMySQL(NimbusDatabase):
-    """An adapter for mysql-connector-python to fit our program.
-
-    The NimbusMySQL makes the mysql-connector-python interface
-    compatible with the our program's interface.
-
-    Attributes:
-        config_file: a JSON file with the mysql details.
-    """
-
-    def __init__(self, config_file: str = 'config.json') -> None:
-        """
-        Inits Nimbus Database using the hostname, username, password
-        found inside the config_file.
-
-        Args:
-            config_file: a JSON file with a 'mysql' object that holds
-            the connection details.
-
-        Returns:
-            None
-
-        Raises:
-            BadConfigFileError: If the config_file fields are unexpected.
-        """
-        self.connection = None  # gets set according to config_file
-        self.database = None  # gets set according to config_file
-
-        with open(config_file) as json_data_file:
-            config = json.load(json_data_file)
-
-        if config.get('mysql', False):
-            mysql_config = config['mysql']
-            self.connection = mysql.connector.connect(
-                host=mysql_config['host'],
-                user=mysql_config['user'],
-                passwd=mysql_config['password'])
-
-            self.database = mysql_config['database']
-
-            if self.connection is None or self.database is None:
-                raise BadConfigFileError('failed to connect to MySQL')
-        else:
-            msg = "config.json is missing {} field.".format('mysql')
-            raise BadConfigFileError(msg)
-
-    '''Example:
-    >> > db = NimbusDatabase("config.json")
-    >> > db.get_property_from_related_entities(
-        ["firstName", "lastName", "ohRoom"],
-        "Professors", "OfficeHours", "professorId")
-    [("Foaad", "Khosmood", "14-213"), ("John", "Clements", "14-210"), ...]'''
-
-    def get_property_from_entity(
-            self,
-            prop: List[str],
-            entity: str,
-            condition_field: Optional[str] = None,
-            condition_value: Optional[str] = None) -> List[str]:
-        cursor = self.connection.cursor()
-        cursor.execute('use `{}`'.format(self.database))
-        columns = ", ".join(prop)
-
-        if (condition_value is not None) and (condition_field is not None):
-            conditions = condition_field + " = " + "\"" + condition_value + "\""
-            statement = "SELECT {} FROM {} WHERE {}".format(
-                columns, entity, conditions)
-
-        elif (condition_value is None) and (condition_field is None):
-            statement = "SELECT {} FROM {}".format(columns, entity)
-
-        else:
-            print("choose both condition field and condition value")
-            return []
-
-        # print(statement)
-        cursor.execute(statement)
-        tups = cursor.fetchall()
-        cursor.close()
-
-        return tups
-
-    def get_property_from_related_entities(
-            self,
-            prop: List[str],
-            entity1: str,
-            entity2: str,
-            key1: str,
-            key2: Optional[str] = None,
-            condition_field: Optional[str] = None,
-            condition_value: Optional[str] = None) -> List[str]:
-        return []
-
-    def get_fields_of_entity(self, entity1: str) -> str:
-        cursor = self.connection.cursor()
-        # don't know why the line below is a syntactically wrong.
-        # cursor.execute('use {}'.format(self.database))
-        cursor.execute("SHOW COLUMNS FROM {}".format(entity1))
-        fields = cursor.fetchall()
-        cursor.close()
-        return fields
-
-    def yield_entities(self) -> str:
-        """Yields a list of all entities in the database."""
-        cursor = self.connection.cursor()
-        cursor.execute('use {}'.format(self.database))
-        cursor.execute('show tables')
-        # `fetchall` returns a list of single element tuples
-        tups = cursor.fetchall()
-        cursor.close()
-        for x in tups:
-            yield x[0]
-
-    def get_entities(self) -> str:
-        """
-        Returns a list of all entities in the database.
-
-        Example:
-        >>> from database_wrapper import NimbusMySQL
-        >>> db = NimbusMySQL()
-        >>> db.get_entities()
-        ['Clubs', 'Corequisites', 'Corrections', 'Courses', 'OfficeHours',
-        'PolyRatings', 'Prerequisites', 'Professors', 'ResearchInterests',
-        'ResponseFormats', 'ShortNames']
-        """
-        cursor = self.connection.cursor()
-        cursor.execute('use `{}`'.format(self.database))
-        cursor.execute('show tables')
-        # `fetchall` returns a list of single element tuples
-        tups = cursor.fetchall()
-        cursor.close()
-        return [x[0] for x in tups]
-
-    def get_relationships(self) -> str:
-        """Returns a list of all relationships between entities in database."""
-        pass
-
-    def get_unique(self, entity, prop) -> str:
-        """
-        """
-        cursor = self.connection.cursor()
-        cursor.execute('use `{}`'.format(self.database))
-        cursor.execute('select distinct({}) from {}'.format(prop, entity))
-        # `fetchall` returns a list of single element tuples
-        tups = cursor.fetchall()
-        cursor.close()
-        return [x[0] for x in tups]
-
-    def get_bitcount(self, entity, prop) -> str:
-        """
-        """
-        cursor = self.connection.cursor()
-        cursor.execute('use `{}`'.format(self.database))
-        cursor.execute('select bit_count(`{}`) from `{}`'.format(prop, entity))
-        # `fetchall` returns a list of single element tuples
-        tups = cursor.fetchall()
-        cursor.close()
-        return [x[0] for x in tups]
-
-    def get_professor_properties(self, lastName) -> List[str]:
-        # TODO: need to change the get property from entity to accept multiple
-        #       condition fields and values, currently just looks by last name
-        """
-        To get a particular professor's properties
-        """
-
-        # FIXME: resolve unused variable `props`, until then, commented out
-        props = self.get_property_from_entity(prop=["*"],
-                                              entity="Professors",
-                                              condition_field="lastName",
-                                              condition_value=lastName)
-        return props
-
-    def get_course_properties(self, courseName) -> List[str]:
-        # TODO: decide how we want to look up courses/ maybe create two methods
-        #       Currently looks up by courseName
-        """
-        """
-
-        # FIXME: resolve unused variable `props`, until then, commented out
-        props = self.get_property_from_entity(["*"],
-                                              "Courses",
-                                              condition_field="courseName",
-                                              condition_value=courseName)
-        return props
-
-    def get_club_properties(self, clubName):
-        """
-        Gives all of the properties of a club in the database.
-
-        Args:
-            clubName: a string representing the name of the club
-
-        Returns:
-            TODO: Determine type of the return based on the get_property_from_entity() method
-        """
-        pass
-
-    def get_course_schedule(self, courseName):
-        """
-        Describes all of the days and times during the week that a course takes place.
-
-        Args:
-            courseName: a string representing the name of the course
-
-        Returns:
-            TODO: Determine type of the return based on the get_property_from_entity() method
-        """
-        pass
-
-    def get_professor_schedule(self, lastName):
-        """
-        Gives all of the properties of a club in the database.
-
-        Args:
-            lastName: a string representing the last name of the professor
-            TODO: Choose exactly how to be referencing professors
-
-        Returns:
-            TODO: Determine type of the return based on the get_property_from_related_entity() method
-        """
-        pass
-
-    def get_course_prerequisites(self, courseName):
-        """
-        Gives the prerequisite courses for a given course in the database.
-
-        Args:
-            courseName: a string representing the name of the course
-
-        Returns:
-            TODO: Determine type of the return based on the get_property_from_related_entity() method
-        """
-        pass
-
-    def get_professor_research_interests(self, lastName):
-        """
-        Gives the research interests of a specific professor.
-
-        Args:
-            lastName: a string representing the lastName of the professor
-            TODO: Choose exactly how to be referencing professors
-        Returns:
-            TODO: Determine type of the return based on the get_property_from_related_entity() method
-        """
-        pass
-
-    def get_professors_with_interest(self, interest):
-        """
-        Gives the professors who have a specific research interest.
-
-        Args:
-            interest: a string representing a research interest professors may have
-
-        Returns:
-            TODO: Determine type of the return based on the get_property_from_related_entity() method
-        """
-        pass
-
-    def get_professor_polyrating(self, lastName):
-        """
-        Gives the average polyrating of a specific professor.
-
-        Args:
-            lastName: a string representing the lastName of the professor
-            TODO: Choose exactly how to be referencing professors
-        Returns:
-            TODO: Determine type of the return based on the get_property_from_related_entity() method
-        """
-        pass
-
-    def close(self) -> None:
-        """Close the database connection"""
-        self.connection.close()
-        super().close()
-
-
 if __name__ == "__main__":
     db = NimbusMySQLAlchemy()
-    course_list = db.get_course_properties('CSC', 357)
-    print("course_list:", course_list)
-    course_list = db.get_course_properties('CSC', '357')
-    print("course_list:", course_list)
-    csc357 = course_list[0]
-    print("course_list[0].courseName", csc357.courseName)
+    db._create_all_tables()
 
-    db.create_AudioSampleMetaData_table()
-
-    metadata = {
-        "isWakeWord": 'ww',
-        "firstName": "john",
-        "lastName": "doe",
-        "gender": "f",
-        "noiseLevel": "q",
-        "location": "here",
-        "tone": "serious-but-not-really",
-        "timestamp": 1577077883,
-        "username": "guest",
-        "filename": "filename"
+    data = {
+        "building_number": 1,
+        "name": "Administration",
+        "longitude": -120.658561,
+        "latitude": 35.300960
     }
 
-    db.save_audio_sample_meta_data(metadata)
+    db.save_entity(Locations, data)
+
+    data = {
+        "club_name": "Cal Poly Computer Science and Artificial Intelligence",
+        "types": "Academic, Special Interest",
+        "desc": "The Computer Science and Artificial Intelligence club provides...",
+        "contact_email": "maikens@calpoly.edu",
+        "contact_email_2": "fkurfess@calpoly.edu",
+        "contact_person": "Miles Aikens",
+        "contact_phone": "7349723564",
+        "box": "89",
+        "advisor": "Franz Kurfess",
+        "affiliation": "None"
+    }
+
+    db.save_entity(Clubs, data)
+
+    data = {
+        "section_name": "CSC 480_06",
+        "instructor": "Kauffman, Daniel Alexander",
+        "alias": "dkauffma",
+        "title": "Instructor AY",
+        "phone": "+1.805.756.2824",
+        "office": "014-0254A",
+        "type": SectionType.lab,
+        "days": set({'M', 'W', 'F'}),
+        "start": "10:10 AM",
+        "end": "11:00 AM",
+        "location": "014-0257",
+        "department": "CENG-Computer Science & Software Engineering"
+    }
+
+    db.save_entity(Sections, data)
+
+    print(
+        "\n", "\n", "What clubs does is Kurfess advise?", "\n", "\n",
+        db.get_property_from_entity(
+            prop="club_name", entity=Clubs, entity_string="Kurfess"
+        )
+    )
+
+    print(
+        "\n", "\n", "What sections is Kauffman teaching?", "\n", "\n",
+        db.get_property_from_entity(
+            prop="section_name", entity=Sections, entity_string="Kauffman"
+        )
+    )
+
+    print(
+        "\n", "\n", "What is the long & lat of Admin building?", "\n", "\n",
+        [
+            (x, y)
+            for x, y in zip(
+            db.get_property_from_entity(
+                prop="longitude", entity=Locations, entity_string="Admin"
+            ),
+            db.get_property_from_entity(
+                prop="latitude", entity=Locations, entity_string="Admin"
+            ),
+        )
+        ]
+    )
+
+    print(
+        "\n", "\n", "What courses are about Algo?", "\n", "\n",
+        db.get_property_from_entity(
+            prop="courseName", entity=Courses, entity_string="Algo"
+        )
+    )
+
+    print(
+        "\n", "\n", "What courses are about Design?", "\n", "\n",
+        db.get_property_from_entity(
+            prop="courseName", entity=Courses, entity_string="Design"
+        )
+    )
+
+    print(
+        "\n", "\n", "What courses are somehow related to 357?", "\n", "\n",
+        db.get_property_from_entity(
+            prop="courseName", entity=Courses, entity_string="357"
+        )
+    )
+
+
+    print("\n\nQA Tuple list\n\n", db.get_all_qa_pairs(), "\n\n")
+    db.return_qa_pair_csv()

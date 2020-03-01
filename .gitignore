@@ -1,3 +1,6 @@
+nvenv/*
+
+
 .idea/*
 .pyre/*
 
@@ -115,3 +118,6 @@ config.json
 credentials.json
 folder_id.txt
 settings.yaml
+.export_env_vars
+auth.json
+settings.yml
