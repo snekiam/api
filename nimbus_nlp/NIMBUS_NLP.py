@@ -1,7 +1,18 @@
 
+import nltk
+import numpy as np
+import os
+import pandas as pd
+import re
+import sklearn.neighbors
+import spacy
+import sys
+
+from google.api_core.client_options import ClientOptions
+from google.cloud import automl_v1
+from google.cloud.automl_v1.proto import service_pb2
 import os
 import json
-
 from google.api_core.client_options import ClientOptions
 from google.cloud import automl_v1
 
@@ -43,6 +54,7 @@ class NIMBUS_NLP:
     
 
 class Variable_Extraction:
+
     def __init__(self, config_file: str = "config.json"):
 
         with open(config_file) as json_data_file:
