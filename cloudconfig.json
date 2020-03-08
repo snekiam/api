@@ -1,0 +1,33 @@
+{
+    "steps": [
+    {
+        "name": "gcr.io/cloud-builders/docker",
+        "args": [
+            "build",
+            "-t",
+            "gcr.io/csai-nimbus/nimbus-api",
+            "--build-arg",
+            "DATABASE_HOSTNAME",
+            "--build-arg",
+            "DATABASE_PASSWORD",
+            "--build-arg",
+            "DATABASE_USERNAME",
+            "--build-arg",
+            "DATABASE_NAME",
+            "--build-arg",
+            "PYDRIVE_CLIENT_ID",
+            "--build-arg",
+            "PYDRIVE_CLIENT_SECRET",
+            "--build-arg",
+            "GOOGLE_DRIVE_CREDENTIALS",
+            "--build-arg",
+            "GOOGLE_DRIVE_FOLDER_ID",
+            "--build-arg",
+            "GOOGLE_CLOUD_NLP_CREDENTIALS",
+            "--build-arg",
+            "GOOGLE_CLOUD_NLP_MODEL_NAME",
+            "."
+        ]
+    }
+    ]
+}
