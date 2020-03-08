@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 import mysql.connector as m
 from os.path import join
-from db_config import CONFIG
+from db_config_sample import CONFIG
 import time
 
+
 def connect():
-    cxn = m.connect(
-        host=CONFIG['host'],
-        user=CONFIG['user'],
-        passwd=CONFIG['password']
-    )
+    cxn = m.connect(host=CONFIG['host'],
+                    user=CONFIG['user'],
+                    passwd=CONFIG['password'])
     return cxn
+
 
 def get_databases(cxn):
     """
@@ -85,6 +85,69 @@ def what_courses_can_i_take(cxn):
     return [x[0] for x in tups]
 
 
+def courses_offered(cxn, course):
+    """ Answers the question of when can I take "X"course?
+
+    Args:
+        cxn: MySQL database connection object
+        course: the course user wants terms from. Expected format is string
+        "department courseNum"
+    Returns:
+        A list including courseName and a set of terms offered for specified course
+    """
+    c = cxn.cursor()
+
+    c.execute("use dev")
+
+    query = "SELECT courseName, termsOffered from Courses where courseName like \"%"
+    query += course + "%\""
+
+    print(query)
+    c.execute(query)
+    tups = c.fetchall()
+
+    c.close()
+
+    return tups
+
+
+def does_professor_teach_course(cxn, profLastName, profFirstName, course):
+    """ Answers the question of 'Does [Professor] teach [Course]'?
+
+    Args:
+        cxn: MySQL database connection object
+        prof: the name of the professor. If first and last name expressed, otherwise, last name
+        will be used alone
+        course: the course user wants terms from. Expected format is string
+        "department courseNum"
+    Returns:
+        A boolean
+    """
+    c = cxn.cursor()
+
+    c.execute("use dev")
+
+    query = "SELECT c.courseName from Courses c INNER JOIN Professors p on c.Professors_id = p.id where p.lastName like \"%"
+    query += profLastName + "%\""
+
+    # this can be an article of discussion for matching professor names
+    if profFirstName != "":
+        query += " and p.firstName likel \"%"
+        query += profFirstName + "%\""
+
+    query += " and courseName like \"%"
+    query += course + "%\""
+
+    print(query)
+    c.execute(query)
+    tups = c.fetchall()
+
+    c.close()
+    if len(tups) == 0:
+        return False
+    return True
+
+
 if __name__ == "__main__":
     cxn = connect()
 
@@ -101,6 +164,8 @@ if __name__ == "__main__":
 
     print("getting tables...", get_tables(cxn, 'dev'))
 
-    print(what_courses_can_i_take(cxn))
+    print(courses_offered(cxn, "CSC 357"))
+
+    print(does_professor_teach_course(cxn, "Kearns", "", "CSC 349"))
 
     cxn.close()
